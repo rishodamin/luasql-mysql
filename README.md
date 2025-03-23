@@ -4,23 +4,28 @@ This repository provides **prepared statements** support in LuaSQL for MySQL for
 
 ## Prerequisites
 
-### 1. Install MySQL Server & Client
+### 1. Install Lua and MySQL Dependencies
+```sh
+sudo apt install lua5.3 liblua5.3-0 liblua5.3-dev
+```
+
+### 2. Install MySQL Server & Client
 ```sh
 sudo apt install mysql-server mysql-client -y
 ```
 
-### 2. Install MySQL Development Libraries
+### 3. Install MySQL Development Libraries
 ```sh
 sudo apt install libmysqlclient-dev
 ```
 
-### 3. Start & Enable MySQL
+### 4. Start & Enable MySQL
 ```sh
 sudo systemctl start mysql
 sudo systemctl enable mysql
 ```
 
-### 4. Set Password to Work Remotely
+### 5. Set Password to Work Remotely
 ```sh
 sudo mysql
 ```
@@ -32,7 +37,7 @@ FLUSH PRIVILEGES;
 EXIT;
 ```
 
-### 5. Create Database, Table, and Insert Records
+### 6. Create Database, Table, and Insert Records
 ```sh
 mysql -u root -p
 ```
@@ -54,7 +59,7 @@ SELECT * FROM student;
 EXIT;
 ```
 
-### 6. Clone This Repository & Test Prepared Statements
+### 7. Clone This Repository & Test Prepared Statements
 After cloning the repository, create a Lua file in the same directory and use the following example code.
 
 ## Usage
