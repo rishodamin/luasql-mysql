@@ -226,20 +226,14 @@ static void cur_nullify (lua_State *L, cur_data *cur) {
 
 void stmt_cur_nullify(stmt_cur_data *cur) {
     if (!cur) return;
-
+	if (cur->closed) return;
+	cur->closed = 1;
     for (int i = 0; i < cur->num_fields; i++) {
         free(cur->row_data[i]);
     }
-    free(cur->row_data);
-    free(cur->bind);
-    free(cur->lengths);
-    free(cur->is_null);
-
     if (cur->my_res) {
         mysql_free_result(cur->my_res);
     }
-
-    free(cur);
 }
 
 	
@@ -297,6 +291,17 @@ static int cur_fetch (lua_State *L) {
 	}
 }
 
+static int stmt_cur_fields (lua_State *L) {
+	stmt_cur_data *cur = (stmt_cur_data *)luaL_checkudata (L, 1, LUASQL_STATEMENT_CURSOR);
+	lua_newtable(L);  
+	for (int i = 0; i < cur->num_fields; i++) {
+		lua_pushinteger(L, i+1);
+		lua_pushstring(L, cur->fields[i].name);
+		lua_settable(L, -3);
+	}
+	return 1;
+}
+
 static int stmt_cur_fetch (lua_State *L) {
 	stmt_cur_data *cur = (stmt_cur_data *)luaL_checkudata (L, 1, LUASQL_STATEMENT_CURSOR);
 	if (mysql_stmt_fetch(cur->stmt)) {
@@ -304,8 +309,23 @@ static int stmt_cur_fetch (lua_State *L) {
 		lua_pushnil(L);  /* no more results */
 		return 1;
 	}
-	// implement
-	return 0;
+	const char *opts = luaL_optstring (L, 2, "n");
+	lua_newtable(L);  
+	for (int i = 0; i < cur->num_fields; i++) {
+		if (strchr (opts, 'n') != NULL){
+			lua_pushinteger(L, i+1);
+		} else{
+			lua_pushstring(L, cur->fields[i].name);
+		}
+		if (cur->is_null[i]) {
+			lua_pushnil(L);
+		} else {
+			cur->row_data[i][cur->lengths[i]] = '\0';
+			lua_pushstring(L, cur->row_data[i]);
+		}
+		lua_settable(L, -3);
+	}
+	return 1;
 }
 
 /*
@@ -395,6 +415,31 @@ static int cur_close (lua_State *L) {
 	return 1;
 }
 
+static int stmt_cur_gc (lua_State *L) {
+	stmt_cur_data *cur = (stmt_cur_data *)luaL_checkudata (L, 1, LUASQL_STATEMENT_CURSOR);
+	if (cur != NULL && !(cur->closed))
+		stmt_cur_nullify(cur);
+	return 0;
+}
+
+
+/*
+** Close the cursor on top of the stack.
+** Return 1
+*/
+static int stmt_cur_close (lua_State *L) {
+	stmt_cur_data *cur = (stmt_cur_data *)luaL_checkudata (L, 1, LUASQL_STATEMENT_CURSOR);
+	luaL_argcheck (L, cur != NULL, 1, LUASQL_PREFIX"cursor expected");
+	if (cur->closed) {
+		lua_pushboolean (L, 0);
+		lua_pushstring(L, "cursor is already closed");
+		return 2;
+	}
+	stmt_cur_nullify (cur);
+	lua_pushboolean (L, 1);
+	return 1;
+}
+
 
 /*
 ** Pushes a column information table on top of the stack.
@@ -474,7 +519,7 @@ static int create_cursor (lua_State *L, MYSQL *my_conn, int conn, MYSQL_RES *res
 }
 
 static int create_stmt_cursor (lua_State *L, MYSQL_STMT *stmt, MYSQL_RES *result, int num_fields, MYSQL_FIELD *fields) {
-	stmt_cur_data *cur = (cur_data *)LUASQL_NEWUD(L, sizeof(stmt_cur_data));
+	stmt_cur_data *cur = (stmt_cur_data *)LUASQL_NEWUD(L, sizeof(stmt_cur_data));
 	luasql_setmeta (L, LUASQL_STATEMENT_CURSOR);
 
 	 // Get result metadata
@@ -483,7 +528,6 @@ static int create_stmt_cursor (lua_State *L, MYSQL_STMT *stmt, MYSQL_RES *result
 	 cur->fields = fields;
  
 	 cur->num_fields = num_fields;
-	 int num_fields = cur->num_fields;
  
 	 // Allocate memory for MYSQL_BIND array
 	 cur->bind = (MYSQL_BIND *)malloc(sizeof(MYSQL_BIND) * num_fields);
@@ -491,25 +535,11 @@ static int create_stmt_cursor (lua_State *L, MYSQL_STMT *stmt, MYSQL_RES *result
 	 cur->lengths = (unsigned long *)malloc(sizeof(unsigned long) * num_fields);
 	 cur->is_null = (bool *)malloc(sizeof(bool) * num_fields);
  
-	//  if (!cur->bind || !cur->row_data || !cur->lengths || !cur->is_null) {
-	// 	 perror("Memory allocation failed");
-	// 	 stmt_cur_nullify(cur);
-	// 	 return NULL;
-	//  }
- 
 	 memset(cur->bind, 0, sizeof(MYSQL_BIND) * num_fields);
  
 	 // Allocate memory for each row data and initialize MYSQL_BIND
 	 for (int i = 0; i < num_fields; i++) {
 		 cur->row_data[i] = (char *)malloc(1024);
-		//  if (!cur->row_data[i]) {
-		// 	 perror("Failed to allocate memory for row_data");
-		// 	 for (int j = 0; j < i; j++) {
-		// 		 free(cur->row_data[j]);
-		// 	 }
-		// 	 stmt_cur_nullify(cur);
-		// 	 return NULL;
-		//  }
 		 cur->bind[i].buffer_type = MYSQL_TYPE_STRING;
 		 cur->bind[i].buffer = cur->row_data[i];
 		 cur->bind[i].buffer_length = 1024;
@@ -637,9 +667,7 @@ static int conn_prepare(lua_State *L) {
     const char *sql = luaL_checkstring(L, 2);
     
     stmt_data *stmt = (stmt_data *)LUASQL_NEWUD(L, sizeof(stmt_data));
-//	printf("[DEBUG] Setting statement metatable...\n");
     luasql_setmeta(L, LUASQL_STATEMENT);
-	//printf("[DEBUG] Statement metatable set!\n");
 
     stmt->stmt = mysql_stmt_init(conn->my_conn);
     if (!stmt->stmt) {
@@ -656,7 +684,6 @@ static int conn_prepare(lua_State *L) {
     stmt->closed = 0;
 	lua_pushvalue(L, 1);
     stmt->conn = luaL_ref(L, LUA_REGISTRYINDEX);
-//	printf("[DEBUG] Prepared\n");
     return 1; // Return statement object
 }
 
@@ -737,9 +764,8 @@ static int stmt_execute(lua_State *L) {
 	res = mysql_stmt_result_metadata(stmt->stmt);
 	num_cols = mysql_stmt_field_count(stmt->stmt);
 	fields = mysql_fetch_fields(res);
-	if (res) { /* tuples returned */
-		printf("it has data\n");
-		return create_stmt_cursor(L, stmt, res, num_cols, fields);
+	if (res) {
+		return create_stmt_cursor(L, stmt->stmt, res, num_cols, fields);
 	}
 
 	if(num_cols == 0) { /* no tuples returned */
@@ -831,7 +857,6 @@ static int conn_getlastautoid (lua_State *L) {
 static int create_connection (lua_State *L, int env, MYSQL *const my_conn) {
 	conn_data *conn = (conn_data *)LUASQL_NEWUD(L, sizeof(conn_data));
 	luasql_setmeta (L, LUASQL_CONNECTION_MYSQL);
-	//printf("[DEBUG] Created MySQL connection\n");
 	/* fill in structure */
 	conn->closed = 0;
 	conn->env = LUA_NOREF;
@@ -942,13 +967,18 @@ static void create_metatables (lua_State *L) {
 		{NULL, NULL},
     };
 	struct luaL_Reg statement_methods[] = {
+		{"__gc", stmt_finalize},
+		{"__close", stmt_finalize},
         {"bind", stmt_bind},
         {"execute", stmt_execute},
-		//{"fetch", stmt_cur_fetch},
         {"finalize", stmt_finalize},
         {NULL, NULL}
     };
 	struct luaL_Reg statement_cursor_methods[] = {
+		{"__gc", stmt_cur_gc},
+		{"__close", stmt_cur_gc},
+		{"close", stmt_cur_close},
+		{"fields", stmt_cur_fields},
 		{"fetch", stmt_cur_fetch},
         {NULL, NULL}
     };

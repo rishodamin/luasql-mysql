@@ -18,13 +18,13 @@ if not cursor then
 end
 
 -- Fetch and print results
-local row = cursor:fetch({}) -- Fetch rows as a table with column names as keys
+local row = cursor:fetch({}, "j") -- Fetch rows as a table with column names as keys
 while row do
     for key, value in pairs(row) do
         print(key .. ": " .. tostring(value) .. '\n')
     end
     print("--------------------")
-    row = cursor:fetch({}, "a")
+    row = cursor:fetch({}, "j")
 end
 
 -- Cleanup

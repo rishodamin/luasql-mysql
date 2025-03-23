@@ -15,10 +15,22 @@ if conn then
     -- local stmt = conn:prepare("delete from student where id > ?")
     -- stmt:bind(1, 9)
 
-    local stmt = conn:prepare("delete from student where id = 8")
-   -- local stmt = conn:prepare("select * from student")
-
-    stmt:execute()
+   -- local stmt = conn:prepare("delete from student where id = 8")
+    local stmt = conn:prepare("select * from student")
+    local cursor = stmt:execute()
+    local fields = cursor:fields()
+    for key, value in pairs(fields) do
+        print(key .. ": " .. value)
+    end
+    print()
+    local row = cursor:fetch("uun") -- Fetch rows as a table with column names as keys
+    while row do
+        for key, value in pairs(row) do
+            print(key .. ": " .. tostring(value))
+        end
+        print("--------------------")
+        row = cursor:fetch("jbnn")
+    end
     stmt:finalize()
     conn:close()
 else
