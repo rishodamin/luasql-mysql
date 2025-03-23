@@ -26,6 +26,8 @@
 #define LUASQL_ENVIRONMENT_MYSQL "MySQL environment"
 #define LUASQL_CONNECTION_MYSQL "MySQL connection"
 #define LUASQL_CURSOR_MYSQL "MySQL cursor"
+#define LUASQL_STATEMENT "MySQL statement"
+#define LUASQL_STATEMENT_CURSOR "MySQL statement cursor"
 
 /* For compat with old version 4.0 */
 #if (MYSQL_VERSION_ID < 40100) 
@@ -78,6 +80,37 @@ typedef struct {
 	MYSQL 	  *my_conn;
 } cur_data;
 
+typedef struct {
+	short      closed;
+	MYSQL_STMT *stmt;
+	int        num_fields;          
+	MYSQL_BIND *bind ; 
+	MYSQL_RES *my_res;
+	MYSQL_FIELD *fields;
+	char **row_data;
+	unsigned long *lengths ;
+	bool *is_null;
+	int stmt_ref;  // Reference to the connection in Lua registry
+} stmt_cur_data;
+
+
+typedef struct {
+    short closed;
+    MYSQL_STMT *stmt;
+    MYSQL_BIND *params;
+    unsigned int num_params;
+    int conn;  // Reference to the connection in Lua registry
+
+    // Added persistent storage for parameter values
+    struct {
+        int integer; 
+        double number;
+        char boolean;
+        char *str;
+        unsigned long size;
+    } *params_data;
+
+} stmt_data;
 
 /*
 ** Check for valid environment.
@@ -191,6 +224,24 @@ static void cur_nullify (lua_State *L, cur_data *cur) {
 	luaL_unref (L, LUA_REGISTRYINDEX, cur->coltypes);
 }
 
+void stmt_cur_nullify(stmt_cur_data *cur) {
+    if (!cur) return;
+
+    for (int i = 0; i < cur->num_fields; i++) {
+        free(cur->row_data[i]);
+    }
+    free(cur->row_data);
+    free(cur->bind);
+    free(cur->lengths);
+    free(cur->is_null);
+
+    if (cur->my_res) {
+        mysql_free_result(cur->my_res);
+    }
+
+    free(cur);
+}
+
 	
 /*
 ** Get another row of the given cursor.
@@ -244,6 +295,17 @@ static int cur_fetch (lua_State *L) {
 			pushvalue (L, row[i], lengths[i]);
 		return cur->numcols; /* return #numcols values */
 	}
+}
+
+static int stmt_cur_fetch (lua_State *L) {
+	stmt_cur_data *cur = (stmt_cur_data *)luaL_checkudata (L, 1, LUASQL_STATEMENT_CURSOR);
+	if (mysql_stmt_fetch(cur->stmt)) {
+		stmt_cur_nullify(cur);
+		lua_pushnil(L);  /* no more results */
+		return 1;
+	}
+	// implement
+	return 0;
 }
 
 /*
@@ -411,6 +473,63 @@ static int create_cursor (lua_State *L, MYSQL *my_conn, int conn, MYSQL_RES *res
 	return 1;
 }
 
+static int create_stmt_cursor (lua_State *L, MYSQL_STMT *stmt, MYSQL_RES *result, int num_fields, MYSQL_FIELD *fields) {
+	stmt_cur_data *cur = (cur_data *)LUASQL_NEWUD(L, sizeof(stmt_cur_data));
+	luasql_setmeta (L, LUASQL_STATEMENT_CURSOR);
+
+	 // Get result metadata
+	 cur->my_res = result;
+	 cur->stmt = stmt;
+	 cur->fields = fields;
+ 
+	 cur->num_fields = num_fields;
+	 int num_fields = cur->num_fields;
+ 
+	 // Allocate memory for MYSQL_BIND array
+	 cur->bind = (MYSQL_BIND *)malloc(sizeof(MYSQL_BIND) * num_fields);
+	 cur->row_data = (char **)malloc(sizeof(char *) * num_fields);
+	 cur->lengths = (unsigned long *)malloc(sizeof(unsigned long) * num_fields);
+	 cur->is_null = (bool *)malloc(sizeof(bool) * num_fields);
+ 
+	//  if (!cur->bind || !cur->row_data || !cur->lengths || !cur->is_null) {
+	// 	 perror("Memory allocation failed");
+	// 	 stmt_cur_nullify(cur);
+	// 	 return NULL;
+	//  }
+ 
+	 memset(cur->bind, 0, sizeof(MYSQL_BIND) * num_fields);
+ 
+	 // Allocate memory for each row data and initialize MYSQL_BIND
+	 for (int i = 0; i < num_fields; i++) {
+		 cur->row_data[i] = (char *)malloc(1024);
+		//  if (!cur->row_data[i]) {
+		// 	 perror("Failed to allocate memory for row_data");
+		// 	 for (int j = 0; j < i; j++) {
+		// 		 free(cur->row_data[j]);
+		// 	 }
+		// 	 stmt_cur_nullify(cur);
+		// 	 return NULL;
+		//  }
+		 cur->bind[i].buffer_type = MYSQL_TYPE_STRING;
+		 cur->bind[i].buffer = cur->row_data[i];
+		 cur->bind[i].buffer_length = 1024;
+		 cur->bind[i].length = &cur->lengths[i];
+		 cur->bind[i].is_null = &cur->is_null[i];
+	 }
+
+	 if (mysql_stmt_bind_result(stmt, cur->bind)) {
+		stmt_cur_nullify(cur);
+        luaL_error(L, "Couldn't bind stmt with result");
+		return 0;
+    }
+ 
+	 cur->closed = 0; // Mark struct as active
+	lua_pushvalue (L, 1);
+	cur->stmt_ref = luaL_ref (L, LUA_REGISTRYINDEX);
+
+	return 1;
+}
+
 
 static int conn_gc (lua_State *L) {
 	conn_data *conn=(conn_data *)luaL_checkudata(L, 1, LUASQL_CONNECTION_MYSQL);
@@ -513,6 +632,153 @@ static int conn_execute (lua_State *L) {
 }
 
 
+static int conn_prepare(lua_State *L) {
+    conn_data *conn = getconnection(L);
+    const char *sql = luaL_checkstring(L, 2);
+    
+    stmt_data *stmt = (stmt_data *)LUASQL_NEWUD(L, sizeof(stmt_data));
+//	printf("[DEBUG] Setting statement metatable...\n");
+    luasql_setmeta(L, LUASQL_STATEMENT);
+	//printf("[DEBUG] Statement metatable set!\n");
+
+    stmt->stmt = mysql_stmt_init(conn->my_conn);
+    if (!stmt->stmt) {
+        return luasql_failmsg(L, "error preparing statement. MySQL: ", mysql_error(conn->my_conn));
+    }
+
+    if (mysql_stmt_prepare(stmt->stmt, sql, strlen(sql)) != 0) {
+        return luasql_failmsg(L, "error preparing statement. MySQL: ", mysql_stmt_error(stmt->stmt));
+    }
+
+    stmt->num_params = mysql_stmt_param_count(stmt->stmt);
+    stmt->params = (MYSQL_BIND *)calloc(stmt->num_params, sizeof(MYSQL_BIND));
+	stmt->params_data = (typeof(stmt->params_data))calloc(stmt->num_params, sizeof(*stmt->params_data));
+    stmt->closed = 0;
+	lua_pushvalue(L, 1);
+    stmt->conn = luaL_ref(L, LUA_REGISTRYINDEX);
+//	printf("[DEBUG] Prepared\n");
+    return 1; // Return statement object
+}
+
+static int stmt_bind(lua_State *L) {
+    stmt_data *stmt = (stmt_data *)luaL_checkudata(L, 1, LUASQL_STATEMENT);
+    int index = luaL_checkinteger(L, 2) - 1;  // Convert Lua 1-based index to C 0-based index
+    
+    if (index < 0 || index >= stmt->num_params) {
+        return luaL_error(L, "Invalid parameter index");
+    }
+
+    MYSQL_BIND *param = &stmt->params[index];
+    int type = lua_type(L, 3);
+
+    switch (type) {
+        case LUA_TNUMBER:
+            if (lua_isinteger(L, 3)) {
+                stmt->params_data[index].integer = lua_tointeger(L, 3);
+                param->buffer_type = MYSQL_TYPE_LONG;
+                param->buffer = &stmt->params_data[index].integer;
+                param->buffer_length = sizeof(int);
+            } else {
+                stmt->params_data[index].number = lua_tonumber(L, 3);
+                param->buffer_type = MYSQL_TYPE_DOUBLE;
+                param->buffer = &stmt->params_data[index].number;
+                param->buffer_length = sizeof(double);
+            }
+            break;
+        
+        case LUA_TSTRING:
+            stmt->params_data[index].str = strdup(lua_tostring(L, 3));
+            param->buffer_type = MYSQL_TYPE_STRING;
+            param->buffer = (void *)stmt->params_data[index].str;
+            param->buffer_length = strlen(stmt->params_data[index].str);
+            break;
+        
+        case LUA_TBOOLEAN:
+            stmt->params_data[index].boolean = lua_toboolean(L, 3);
+            param->buffer_type = MYSQL_TYPE_TINY;
+            param->buffer = &stmt->params_data[index].boolean;
+            param->buffer_length = sizeof(char);
+            break;
+        
+        case LUA_TNIL:
+            param->buffer_type = MYSQL_TYPE_NULL;
+            break;
+        
+        default:
+            return luasql_faildirect(L, "error executing query. Invalid parameter type");
+    }
+
+    if (mysql_stmt_bind_param(stmt->stmt, stmt->params)) {
+        printf("[ERROR] mysql_stmt_bind_param() failed: %s\n", mysql_stmt_error(stmt->stmt));
+        return luasql_failmsg(L, "error executing query (stmt_bind_param). MySQL: ", mysql_stmt_error(stmt->stmt));
+    }
+
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+
+
+static int stmt_execute(lua_State *L) {
+	stmt_data *stmt = (stmt_data *)luaL_checkudata(L, 1, LUASQL_STATEMENT);
+	MYSQL_RES * res;
+	MYSQL_FIELD *fields;
+	unsigned int num_cols;
+	if (mysql_stmt_execute(stmt->stmt)) {
+
+		printf("[ERROR] mysql_stmt_execute() failed: %s\n", mysql_stmt_error(stmt->stmt));
+		int n = luasql_failmsg(L, "error executing query (stmt_execute). MySQL: ", mysql_stmt_error(stmt->stmt));
+		return n;
+	}
+	if (mysql_stmt_store_result(stmt->stmt)) {
+		int n = luasql_failmsg(L, "error executing query (stmt_store_result). MySQL: ", mysql_stmt_error(stmt->stmt));
+		return n;
+	}
+	res = mysql_stmt_result_metadata(stmt->stmt);
+	num_cols = mysql_stmt_field_count(stmt->stmt);
+	fields = mysql_fetch_fields(res);
+	if (res) { /* tuples returned */
+		printf("it has data\n");
+		return create_stmt_cursor(L, stmt, res, num_cols, fields);
+	}
+
+	if(num_cols == 0) { /* no tuples returned */
+	/* query does not return data (it was not a SELECT) */
+		lua_pushinteger(L, mysql_stmt_affected_rows(stmt->stmt));
+		return 1;
+	} else { /* mysql_use_result() should have returned data */
+		return luasql_failmsg(L, "error retrieving result. MySQL: ", mysql_stmt_error(stmt->stmt));
+	}
+}
+
+static int stmt_finalize(lua_State *L) {
+    stmt_data *stmt = (stmt_data *)luaL_checkudata(L, 1, LUASQL_STATEMENT);
+
+    if (!stmt->closed) {
+        mysql_stmt_close(stmt->stmt);
+        stmt->closed = 1;
+
+        for (unsigned int i = 0; i < stmt->num_params; i++) {
+            if (stmt->params_data[i].str) {
+                free(stmt->params_data[i].str);
+                stmt->params_data[i].str = NULL;
+            }
+        }
+
+        free(stmt->params_data);
+        stmt->params_data = NULL;
+
+        free(stmt->params);
+        stmt->params = NULL;
+
+        luaL_unref(L, LUA_REGISTRYINDEX, stmt->conn);
+    }
+
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+
 /*
 ** Commit the current transaction.
 */
@@ -565,7 +831,7 @@ static int conn_getlastautoid (lua_State *L) {
 static int create_connection (lua_State *L, int env, MYSQL *const my_conn) {
 	conn_data *conn = (conn_data *)LUASQL_NEWUD(L, sizeof(conn_data));
 	luasql_setmeta (L, LUASQL_CONNECTION_MYSQL);
-
+	//printf("[DEBUG] Created MySQL connection\n");
 	/* fill in structure */
 	conn->closed = 0;
 	conn->env = LUA_NOREF;
@@ -659,6 +925,7 @@ static void create_metatables (lua_State *L) {
         {"rollback", conn_rollback},
         {"setautocommit", conn_setautocommit},
 		{"getlastautoid", conn_getlastautoid},
+		{"prepare", conn_prepare},
 		{NULL, NULL},
     };
     struct luaL_Reg cursor_methods[] = {
@@ -674,10 +941,24 @@ static void create_metatables (lua_State *L) {
 		{"hasnextresult", cur_has_next_result},
 		{NULL, NULL},
     };
+	struct luaL_Reg statement_methods[] = {
+        {"bind", stmt_bind},
+        {"execute", stmt_execute},
+		//{"fetch", stmt_cur_fetch},
+        {"finalize", stmt_finalize},
+        {NULL, NULL}
+    };
+	struct luaL_Reg statement_cursor_methods[] = {
+		{"fetch", stmt_cur_fetch},
+        {NULL, NULL}
+    };
+
 	luasql_createmeta (L, LUASQL_ENVIRONMENT_MYSQL, environment_methods);
 	luasql_createmeta (L, LUASQL_CONNECTION_MYSQL, connection_methods);
 	luasql_createmeta (L, LUASQL_CURSOR_MYSQL, cursor_methods);
-	lua_pop (L, 3);
+	luasql_createmeta(L, LUASQL_STATEMENT, statement_methods);
+	luasql_createmeta(L, LUASQL_STATEMENT_CURSOR, statement_cursor_methods);
+	lua_pop (L, 5);
 }
 
 
@@ -715,5 +996,9 @@ lua_pushliteral (L, MYSQL_SERVER_VERSION);
 #endif
     lua_settable (L, -3);
 	return 1;
+}
+
+LUAMOD_API int luaopen_mysql(lua_State *L) {
+    return luaopen_luasql_mysql(L); 
 }
 
