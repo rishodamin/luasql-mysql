@@ -60,9 +60,17 @@ EXIT;
 ```
 
 ### 7. Clone This Repository & Test Prepared Statements
-After cloning the repository, create a Lua file in the same directory and use the following example code.
+```sh
+git clone https://github.com/rishodamin/luasql-mysql.git
+cd luasql-mysql
+```
+
+After cloning the repository, create a new Lua file named `main.lua` in the same directory and add the following example code.
 
 ## Usage
+
+### Creating `main.lua`
+Create a new file named `main.lua` and paste the following code inside it:
 
 ### Connecting to MySQL
 ```lua
@@ -104,6 +112,12 @@ end
 env:close()
 ```
 
+### Running the Script
+Once you have created `main.lua`, run the script using:
+```sh
+lua main.lua
+```
+
 ### Fetching Field Names Before Results
 ```lua
 local fields = cursor:fields() -- Returns a key-value table like:
@@ -132,5 +146,8 @@ local rows_affected = stmt:execute()
 - **Bulk insert from a table**
 - **Proper error handling**
 
-**Thanks!** 
+## License
+This project is licensed under the MIT License.
+
+**Thanks!** 🚀
 
