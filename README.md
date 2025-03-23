@@ -146,8 +146,5 @@ local rows_affected = stmt:execute()
 - **Bulk insert from a table**
 - **Proper error handling**
 
-## License
-This project is licensed under the MIT License.
-
-**Thanks!** 🚀
+**Thanks!**
 
